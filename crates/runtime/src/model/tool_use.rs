@@ -389,6 +389,14 @@ impl ToolUsingChat {
             tracing::debug!(
                 "Tool-use recursion limit reached. Will call model, but not process further"
             );
+            let req = if req.tools.as_ref().is_none_or(Vec::is_empty) {
+                let mut req = req;
+                req.tool_choice = None;
+                req.parallel_tool_calls = None;
+                req
+            } else {
+                req
+            };
             return self.inner_chat.chat_stream(req).await;
         }
 
@@ -1173,6 +1181,55 @@ mod tests {
             "[].Assistant.tool_calls[].id" => "[tool_call_id]",
             "[].Tool.tool_call_id" => "[tool_call_id]"
         });
+    }
+
+    struct NoToolsChat;
+
+    #[async_trait]
+    impl Chat for NoToolsChat {
+        fn as_sql(&self) -> Option<&dyn SqlGeneration> {
+            None
+        }
+
+        async fn chat_stream(
+            &self,
+            req: CreateChatCompletionRequest,
+        ) -> Result<ChatCompletionResponseStream, OpenAIError> {
+            assert!(req.tools.as_ref().is_none_or(Vec::is_empty));
+            assert!(
+                req.tool_choice.is_none(),
+                "tool_choice must be omitted when the request has no tools"
+            );
+            assert!(
+                req.parallel_tool_calls.is_none(),
+                "parallel_tool_calls must be omitted when the request has no tools"
+            );
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_recursion_limit_does_not_send_tool_settings_without_tools() {
+        let chat = ToolUsingChat::new(
+            Arc::new(NoToolsChat),
+            Arc::new(Runtime::builder().build().await),
+            vec![],
+            Some(0),
+        );
+        let req = CreateChatCompletionRequest {
+            model: "test".to_string(),
+            tool_choice: Some(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::Auto,
+            )),
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        };
+
+        let mut stream = chat
+            .chat_stream_inner(req)
+            .await
+            .expect("stream should be created");
+        assert!(stream.next().await.is_none());
     }
 
     fn allowed_tools(mode: ToolChoiceAllowedMode) -> ChatCompletionToolChoiceOption {
